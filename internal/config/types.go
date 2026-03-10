@@ -1157,6 +1157,12 @@ type MergeQueueConfig struct {
 	// StaleClaimTimeout is how long a claimed MR can go without updates before
 	// being considered abandoned and eligible for re-claim (e.g., "30m").
 	StaleClaimTimeout string `json:"stale_claim_timeout,omitempty"`
+
+	// AuthorFilter restricts the merge queue to only process MRs whose branch
+	// commits were authored by the specified git usernames or email addresses.
+	// When empty (default), all MRs are eligible regardless of author.
+	// Example: ["mccraigmccraig"] or ["user@example.com"]
+	AuthorFilter []string `json:"author_filter,omitempty"`
 }
 
 // OnConflict strategy constants.

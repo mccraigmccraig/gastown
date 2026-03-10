@@ -723,6 +723,31 @@ func (g *Git) GetBranchCommitMessage(branch string) (string, error) {
 	return g.run("log", "-1", "--format=%B", branch)
 }
 
+// GetBranchAuthors returns the deduplicated set of author identities (name <email>)
+// for commits on the given branch that are not on the target branch.
+// This is useful for filtering MRs by commit authorship.
+func (g *Git) GetBranchAuthors(branch, target string) ([]string, error) {
+	// Get unique author lines for commits on branch but not on target
+	out, err := g.run("log", "--format=%an <%ae>", target+".."+branch)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	seen := make(map[string]bool)
+	var authors []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !seen[line] {
+			seen[line] = true
+			authors = append(authors, line)
+		}
+	}
+	return authors, nil
+}
+
 // RecentCommits returns the last n commits as one-line summaries (hash + subject).
 // Returns empty string if there are no commits or the repo is empty.
 func (g *Git) RecentCommits(n int) (string, error) {

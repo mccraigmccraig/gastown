@@ -41,7 +41,8 @@
         "retry_flaky_tests": 1,
         "poll_interval": "30s",
         "max_concurrent": 1,
-        "stale_claim_timeout": "30m"
+        "stale_claim_timeout": "30m",
+        "author_filter": ["mccraigmccraig"]
     },
 
     "theme": {

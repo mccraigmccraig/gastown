@@ -127,6 +127,11 @@ type MergeQueueConfig struct {
 	// Batch holds configuration for the batch-then-bisect merge queue.
 	// When nil or MaxBatchSize <= 1, batching is disabled and MRs process sequentially.
 	Batch *BatchConfig `json:"batch,omitempty"`
+
+	// AuthorFilter restricts the merge queue to only process MRs whose branch
+	// commits were authored by the specified git usernames or email addresses.
+	// When empty, all MRs are eligible regardless of author.
+	AuthorFilter []string `json:"author_filter,omitempty"`
 }
 
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
@@ -298,6 +303,7 @@ func (e *Engineer) LoadConfig() error {
 		StaleClaimTimeout    *string                    `json:"stale_claim_timeout"`
 		Gates                map[string]*gateConfigRaw  `json:"gates"`
 		GatesParallel        *bool                      `json:"gates_parallel"`
+		AuthorFilter         []string                   `json:"author_filter"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -364,6 +370,9 @@ func (e *Engineer) LoadConfig() error {
 	}
 	if mqRaw.GatesParallel != nil {
 		e.config.GatesParallel = *mqRaw.GatesParallel
+	}
+	if len(mqRaw.AuthorFilter) > 0 {
+		e.config.AuthorFilter = mqRaw.AuthorFilter
 	}
 
 	return nil
@@ -1322,10 +1331,46 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 				issue.ID, issue.Assignee, issue.UpdatedAt)
 		}
 
-		mrs = append(mrs, issueToMRInfo(issue, fields))
+		mr := issueToMRInfo(issue, fields)
+
+		// Apply author filter: skip MRs whose branch commits are not by allowed authors.
+		if len(e.config.AuthorFilter) > 0 && mr.Branch != "" && mr.Target != "" {
+			if !e.branchMatchesAuthorFilter(mr.Branch, mr.Target) {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping MR %s: branch %s does not match author filter\n", issue.ID, mr.Branch)
+				continue
+			}
+		}
+
+		mrs = append(mrs, mr)
 	}
 
 	return mrs, nil
+}
+
+// branchMatchesAuthorFilter checks whether any commit author on the branch
+// matches the configured author filter. Matching is case-insensitive against
+// author name, email, or the full "name <email>" identity string.
+func (e *Engineer) branchMatchesAuthorFilter(branch, target string) bool {
+	authors, err := e.git.GetBranchAuthors(branch, target)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get branch authors for %s: %v (allowing MR)\n", branch, err)
+		return true // fail-open: if we can't check, allow the MR
+	}
+	if len(authors) == 0 {
+		// No commits on branch (e.g., already merged), allow it
+		return true
+	}
+
+	for _, author := range authors {
+		authorLower := strings.ToLower(author)
+		for _, allowed := range e.config.AuthorFilter {
+			allowedLower := strings.ToLower(allowed)
+			if strings.Contains(authorLower, allowedLower) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ListBlockedMRs returns MRs that are blocked by open tasks.

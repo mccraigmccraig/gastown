@@ -804,3 +804,69 @@ func TestIsClaimStale(t *testing.T) {
 		})
 	}
 }
+
+func TestEngineer_LoadConfig_WithAuthorFilter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	config := map[string]interface{}{
+		"merge_queue": map[string]interface{}{
+			"author_filter": []string{"alice", "bob@example.com"},
+		},
+	}
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error loading config: %v", err)
+	}
+
+	if len(e.config.AuthorFilter) != 2 {
+		t.Fatalf("expected 2 author filter entries, got %d", len(e.config.AuthorFilter))
+	}
+	if e.config.AuthorFilter[0] != "alice" {
+		t.Errorf("expected first author filter 'alice', got %q", e.config.AuthorFilter[0])
+	}
+	if e.config.AuthorFilter[1] != "bob@example.com" {
+		t.Errorf("expected second author filter 'bob@example.com', got %q", e.config.AuthorFilter[1])
+	}
+}
+
+func TestEngineer_LoadConfig_EmptyAuthorFilter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	config := map[string]interface{}{
+		"merge_queue": map[string]interface{}{
+			"enabled": true,
+		},
+	}
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error loading config: %v", err)
+	}
+
+	if len(e.config.AuthorFilter) != 0 {
+		t.Errorf("expected empty author filter, got %v", e.config.AuthorFilter)
+	}
+}
