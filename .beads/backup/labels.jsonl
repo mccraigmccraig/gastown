@@ -1,7 +1,10 @@
-{"issue_id":"st-rig-sfgastown","label":"gt:rig"}
-{"issue_id":"st-rig-sfgastown","label":"status:docked"}
-{"issue_id":"st-sfgastown-crew-dunks","label":"gt:agent"}
-{"issue_id":"st-sfgastown-crew-test","label":"gt:agent"}
-{"issue_id":"st-sfgastown-refinery","label":"gt:agent"}
-{"issue_id":"st-sfgastown-witness","label":"gt:agent"}
-{"issue_id":"st-sfgastown-witness","label":"idle:0"}
+{"issue_id":"gt-79f8","label":"backoff-until:1773069030"}
+{"issue_id":"gt-79f8","label":"idle:25"}
+{"issue_id":"gt-79f8","label":"pinned"}
+{"issue_id":"gt-gastown-polecat-furiosa","label":"gt:agent"}
+{"issue_id":"gt-gastown-witness","label":"backoff-until:1772944261"}
+{"issue_id":"gt-gastown-witness","label":"gt:agent"}
+{"issue_id":"gt-gastown-witness","label":"idle:8"}
+{"issue_id":"gt-mol-refinery-patrol","label":"template"}
+{"issue_id":"gt-rig-gastown","label":"gt:rig"}
+{"issue_id":"gt-rig-gastown","label":"idle:7"}
