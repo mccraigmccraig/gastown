@@ -305,3 +305,37 @@ func TestFailureType_ShouldAssignToWorker(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePhaseTransition_AwaitingApproval(t *testing.T) {
+	tests := []struct {
+		name    string
+		from    MRPhase
+		to      MRPhase
+		wantErr bool
+	}{
+		// Valid transitions into awaiting_approval
+		{"prepared to awaiting_approval", MRPhasePrepared, MRPhaseAwaitingApproval, false},
+		// Valid transitions out of awaiting_approval
+		{"awaiting_approval to merging", MRPhaseAwaitingApproval, MRPhaseMerging, false},
+		{"awaiting_approval to rejected", MRPhaseAwaitingApproval, MRPhaseRejected, false},
+		{"awaiting_approval to ready", MRPhaseAwaitingApproval, MRPhaseReady, false},
+		// Invalid transitions
+		{"ready to awaiting_approval", MRPhaseReady, MRPhaseAwaitingApproval, true},
+		{"merging to awaiting_approval", MRPhaseMerging, MRPhaseAwaitingApproval, true},
+		{"awaiting_approval to prepared", MRPhaseAwaitingApproval, MRPhasePrepared, true},
+		// Self-transition is valid
+		{"awaiting_approval to self", MRPhaseAwaitingApproval, MRPhaseAwaitingApproval, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePhaseTransition(tt.from, tt.to)
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidatePhaseTransition(%s, %s) expected error, got nil", tt.from, tt.to)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidatePhaseTransition(%s, %s) unexpected error: %v", tt.from, tt.to, err)
+			}
+		})
+	}
+}

@@ -226,6 +226,40 @@ Examples:
 
 var refineryBlockedJSON bool
 
+var refineryApproveCmd = &cobra.Command{
+	Use:   "approve <mr-id>",
+	Short: "Approve an MR awaiting approval",
+	Long: `Approve a merge request that passed quality gates and is awaiting approval.
+
+When approval_mode is set to "human" or "mayor" in the rig's merge queue config,
+MRs pause after passing gates and wait for explicit approval before pushing.
+
+This command approves the MR, allowing the refinery to merge it on the next
+poll cycle without re-running gates.
+
+Examples:
+  gt refinery approve gt-abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRefineryApprove,
+}
+
+var refineryAwaitingCmd = &cobra.Command{
+	Use:     "awaiting [rig]",
+	Aliases: []string{"pending-approval"},
+	Short:   "List MRs awaiting approval",
+	Long: `List merge requests that have passed quality gates and are awaiting approval.
+
+These MRs are ready to merge but require explicit approval via 'gt refinery approve'.
+
+Examples:
+  gt refinery awaiting
+  gt refinery awaiting --json`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runRefineryAwaiting,
+}
+
+var refineryAwaitingJSON bool
+
 func init() {
 	// Start flags
 	refineryStartCmd.Flags().BoolVar(&refineryForeground, "foreground", false, "Run in foreground (default: background)")
@@ -253,6 +287,9 @@ func init() {
 	// Blocked flags
 	refineryBlockedCmd.Flags().BoolVar(&refineryBlockedJSON, "json", false, "Output as JSON")
 
+	// Awaiting flags
+	refineryAwaitingCmd.Flags().BoolVar(&refineryAwaitingJSON, "json", false, "Output as JSON")
+
 	// Add subcommands
 	refineryCmd.AddCommand(refineryStartCmd)
 	refineryCmd.AddCommand(refineryStopCmd)
@@ -265,6 +302,8 @@ func init() {
 	refineryCmd.AddCommand(refineryUnclaimedCmd)
 	refineryCmd.AddCommand(refineryReadyCmd)
 	refineryCmd.AddCommand(refineryBlockedCmd)
+	refineryCmd.AddCommand(refineryApproveCmd)
+	refineryCmd.AddCommand(refineryAwaitingCmd)
 
 	rootCmd.AddCommand(refineryCmd)
 }
@@ -854,6 +893,75 @@ func runRefineryBlocked(cmd *cobra.Command, args []string) error {
 		if mr.BlockedBy != "" {
 			fmt.Printf("     Blocked by: %s\n", mr.BlockedBy)
 		}
+	}
+
+	return nil
+}
+
+func runRefineryApprove(cmd *cobra.Command, args []string) error {
+	mrID := args[0]
+
+	// Find beads from current working directory
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	rigName, err := inferRigFromCwd(townRoot)
+	if err != nil {
+		return fmt.Errorf("could not determine rig: %w", err)
+	}
+
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return err
+	}
+
+	eng := refinery.NewEngineer(r)
+	if err := eng.ApproveMR(mrID); err != nil {
+		return fmt.Errorf("approving MR: %w", err)
+	}
+
+	fmt.Printf("%s Approved %s — will merge on next refinery poll cycle\n", style.Bold.Render("✓"), mrID)
+	return nil
+}
+
+func runRefineryAwaiting(cmd *cobra.Command, args []string) error {
+	rigName := ""
+	if len(args) > 0 {
+		rigName = args[0]
+	}
+
+	_, r, rigName, err := getRefineryManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	eng := refinery.NewEngineer(r)
+	awaiting, err := eng.ListAwaitingApproval()
+	if err != nil {
+		return fmt.Errorf("listing awaiting MRs: %w", err)
+	}
+
+	// JSON output
+	if refineryAwaitingJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(awaiting)
+	}
+
+	// Human-readable output
+	fmt.Printf("%s MRs awaiting approval for '%s':\n\n", style.Bold.Render("⏸"), rigName)
+
+	if len(awaiting) == 0 {
+		fmt.Printf("  %s\n", style.Dim.Render("(none awaiting approval)"))
+		return nil
+	}
+
+	for i, mr := range awaiting {
+		priority := fmt.Sprintf("P%d", mr.Priority)
+		fmt.Printf("  %d. [%s] %s → %s\n", i+1, priority, mr.Branch, mr.Target)
+		fmt.Printf("     ID: %s  Worker: %s\n", mr.ID, mr.Worker)
+		fmt.Printf("     Approve with: gt refinery approve %s\n", mr.ID)
 	}
 
 	return nil

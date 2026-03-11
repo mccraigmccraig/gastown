@@ -897,3 +897,76 @@ func TestEngineer_LoadConfig_EmptyAuthorFilter(t *testing.T) {
 		t.Errorf("expected empty author filter, got %v", e.config.AuthorFilter)
 	}
 }
+
+func TestEngineer_LoadConfig_WithApprovalMode(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         string
+		wantMode     string
+		wantErr      bool
+	}{
+		{"human mode", "human", "human", false},
+		{"mayor mode", "mayor", "mayor", false},
+		{"none mode", "none", "none", false},
+		{"empty mode", "", "", false},
+		{"invalid mode", "auto", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			config := map[string]interface{}{
+				"merge_queue": map[string]interface{}{
+					"approval_mode": tt.mode,
+				},
+			}
+			data, _ := json.MarshalIndent(config, "", "  ")
+			if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+			e := NewEngineer(r)
+			err = e.LoadConfig()
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if e.config.ApprovalMode != tt.wantMode {
+				t.Errorf("got ApprovalMode %q, want %q", e.config.ApprovalMode, tt.wantMode)
+			}
+		})
+	}
+}
+
+func TestMergeQueueConfig_RequiresApproval(t *testing.T) {
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{"", false},
+		{"none", false},
+		{"human", true},
+		{"mayor", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg := &MergeQueueConfig{ApprovalMode: tt.mode}
+			if got := cfg.RequiresApproval(); got != tt.want {
+				t.Errorf("RequiresApproval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

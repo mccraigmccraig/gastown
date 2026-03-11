@@ -132,6 +132,30 @@ type MergeQueueConfig struct {
 	// commits were authored by the specified git usernames or email addresses.
 	// When empty, all MRs are eligible regardless of author.
 	AuthorFilter []string `json:"author_filter,omitempty"`
+
+	// ApprovalMode controls whether an approval gate is required before the
+	// final push to the target branch. Supported values:
+	//   "none"  — no approval required, push immediately after gates pass (default)
+	//   "human" — require explicit human approval via `gt refinery approve`
+	//   "mayor" — require mayor approval (notifies mayor, who approves)
+	ApprovalMode string `json:"approval_mode,omitempty"`
+}
+
+// Approval mode constants for the merge queue.
+const (
+	// ApprovalModeNone means no approval is required (default).
+	ApprovalModeNone = "none"
+
+	// ApprovalModeHuman means explicit human approval via `gt refinery approve`.
+	ApprovalModeHuman = "human"
+
+	// ApprovalModeMayor means the mayor must approve (notified automatically).
+	ApprovalModeMayor = "mayor"
+)
+
+// RequiresApproval returns true if the config requires approval before pushing.
+func (c *MergeQueueConfig) RequiresApproval() bool {
+	return c.ApprovalMode == ApprovalModeHuman || c.ApprovalMode == ApprovalModeMayor
 }
 
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
@@ -176,6 +200,11 @@ type MRInfo struct {
 	PreVerified     bool      // Polecat ran full gates after rebasing onto target
 	PreVerifiedAt   time.Time // When verification completed
 	PreVerifiedBase string    // Target branch SHA at verification time
+
+	// Approved indicates this MR was previously awaiting approval and has been approved.
+	// When true, the refinery should skip gates (already verified) and skip the approval
+	// check (already approved) — proceeding directly to merge and push.
+	Approved bool
 
 	// Raw data for agent-side queue health analysis (ZFC: agent decides, Go transports)
 	UpdatedAt          time.Time // When the MR was last updated
@@ -304,6 +333,7 @@ func (e *Engineer) LoadConfig() error {
 		Gates                map[string]*gateConfigRaw  `json:"gates"`
 		GatesParallel        *bool                      `json:"gates_parallel"`
 		AuthorFilter         []string                   `json:"author_filter"`
+		ApprovalMode         *string                    `json:"approval_mode"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -374,6 +404,16 @@ func (e *Engineer) LoadConfig() error {
 	if len(mqRaw.AuthorFilter) > 0 {
 		e.config.AuthorFilter = mqRaw.AuthorFilter
 	}
+	if mqRaw.ApprovalMode != nil {
+		mode := *mqRaw.ApprovalMode
+		switch mode {
+		case ApprovalModeNone, ApprovalModeHuman, ApprovalModeMayor, "":
+			e.config.ApprovalMode = mode
+		default:
+			return fmt.Errorf("invalid approval_mode %q: must be %q, %q, or %q",
+				mode, ApprovalModeNone, ApprovalModeHuman, ApprovalModeMayor)
+		}
+	}
 
 	return nil
 }
@@ -399,6 +439,7 @@ type ProcessResult struct {
 	TestsFailed    bool
 	SlotTimeout    bool // Merge slot contention timeout (distinct from build/test failure)
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
+	NeedsApproval  bool // Gates passed but approval is required before push
 }
 
 // doMerge performs the actual git merge operation.
@@ -548,6 +589,24 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		return ProcessResult{
 			Success: false,
 			Error:   fmt.Sprintf("failed to get merge commit SHA: %v", err),
+		}
+	}
+
+	// Step 6.5: Check approval gate.
+	// If approval is required, return NeedsApproval instead of pushing.
+	// The caller (HandleMRInfoFailure or batch) will transition the MR to
+	// MRPhaseAwaitingApproval and notify the appropriate approver.
+	if e.config.RequiresApproval() {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Approval required (mode=%s) — pausing before push\n", e.config.ApprovalMode)
+		// Reset the local squash commit so the working directory is clean.
+		// The merge will be re-done when approval comes in.
+		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after approval pause: %v\n", target, resetErr)
+		}
+		return ProcessResult{
+			Success:       false,
+			NeedsApproval: true,
+			MergeCommit:   mergeCommit, // Preserve for display/logging
 		}
 	}
 
@@ -886,11 +945,22 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 	_, _ = fmt.Fprintf(e.output, "  Worker: %s\n", mr.Worker)
 	_, _ = fmt.Fprintf(e.output, "  Source: %s\n", mr.SourceIssue)
 
+	// Check if this MR was previously approved (gates already passed, approval given).
+	// Skip gates and proceed directly to merge + push.
+	skipGates := false
+	if mr.Approved {
+		_, _ = fmt.Fprintln(e.output, "[Engineer] MR is approved — skipping gates and approval check")
+		skipGates = true
+		// Temporarily disable approval for this merge to avoid re-triggering the gate
+		origApprovalMode := e.config.ApprovalMode
+		e.config.ApprovalMode = ApprovalModeNone
+		defer func() { e.config.ApprovalMode = origApprovalMode }()
+	}
+
 	// Phase 3: Check pre-verification fast-path.
 	// If the polecat already rebased onto the target and ran gates, and the target
 	// hasn't moved since, we can skip running gates entirely (~5s merge).
-	skipGates := false
-	if mr.PreVerified && mr.PreVerifiedBase != "" {
+	if !skipGates && mr.PreVerified && mr.PreVerifiedBase != "" {
 		_, _ = fmt.Fprintf(e.output, "  Pre-verified: yes (base=%s)\n", mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))])
 		// Check if target HEAD still matches the verified base
 		targetHead, err := e.git.Rev("origin/" + mr.Target)
@@ -1017,6 +1087,13 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 // For slot timeouts, the MR stays in queue for automatic retry without notifying polecats.
 // This enables non-blocking delegation: the queue continues to the next MR.
 func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
+	// Approval gate: gates passed but approval is required before push.
+	// This is not a failure — route to the approval handler.
+	if result.NeedsApproval {
+		e.HandleMRAwaitingApproval(mr, result)
+		return
+	}
+
 	// Slot timeout is transient infrastructure contention — not a build/test/conflict failure.
 	// The MR stays in queue and will be retried on the next poll cycle.
 	// No polecat notification needed since there's nothing for a worker to fix.
@@ -1079,6 +1156,122 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	} else {
 		_, _ = fmt.Fprintln(e.output, "[Engineer] MR remains in queue for retry")
 	}
+}
+
+// HandleMRAwaitingApproval handles an MR that passed gates but requires approval before pushing.
+// It updates the MR phase, records gate results, and notifies the appropriate approver.
+func (e *Engineer) HandleMRAwaitingApproval(mr *MRInfo, result ProcessResult) {
+	// Update the MR bead with awaiting_approval phase
+	if mr.ID != "" {
+		mrBead, err := e.beads.Show(mr.ID)
+		if err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to fetch MR bead %s: %v\n", mr.ID, err)
+		} else {
+			mrFields := beads.ParseMRFields(mrBead)
+			if mrFields == nil {
+				mrFields = &beads.MRFields{}
+			}
+			mrFields.MergeCommit = result.MergeCommit // Store the verified commit for reference
+			newDesc := beads.SetMRFields(mrBead, mrFields)
+			if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to update MR %s: %v\n", mr.ID, err)
+			}
+		}
+
+		// Add awaiting-approval label for easy filtering
+		if err := e.beads.Update(mr.ID, beads.UpdateOptions{AddLabels: []string{"gt:awaiting-approval"}}); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to add awaiting-approval label: %v\n", err)
+		}
+	}
+
+	// Notify the appropriate approver
+	approvalMode := e.config.ApprovalMode
+	switch approvalMode {
+	case ApprovalModeMayor:
+		// Send mail to mayor requesting approval
+		subject := fmt.Sprintf("Approval needed: %s → %s", mr.Branch, mr.Target)
+		body := fmt.Sprintf("MR %s passed quality gates and is ready to merge.\n"+
+			"Branch: %s\nTarget: %s\nWorker: %s\nSource: %s\n\n"+
+			"Approve with: gt refinery approve %s",
+			mr.ID, mr.Branch, mr.Target, mr.Worker, mr.SourceIssue, mr.ID)
+		mailCmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
+		mailCmd.Dir = e.workDir
+		if err := mailCmd.Run(); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to notify mayor for approval: %v\n", err)
+		} else {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Notified mayor for approval of %s\n", mr.ID)
+		}
+	case ApprovalModeHuman:
+		// Log for human operator — they'll see it in the queue
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s awaiting human approval. Approve with: gt refinery approve %s\n", mr.ID, mr.ID)
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] ⏸ Awaiting approval: %s (gates passed, commit %s)\n",
+		mr.ID, result.MergeCommit[:min(8, len(result.MergeCommit))])
+}
+
+// ApproveMR approves a merge request that is awaiting approval.
+// It removes the awaiting-approval label and re-queues the MR for merging
+// by removing the label so it's picked up by the next poll cycle with skipGates=true.
+func (e *Engineer) ApproveMR(mrID string) error {
+	// Verify the MR exists and has the awaiting-approval label
+	issue, err := e.beads.Show(mrID)
+	if err != nil {
+		return fmt.Errorf("MR not found: %w", err)
+	}
+
+	hasLabel := false
+	for _, label := range issue.Labels {
+		if label == "gt:awaiting-approval" {
+			hasLabel = true
+			break
+		}
+	}
+	if !hasLabel {
+		return fmt.Errorf("MR %s is not awaiting approval", mrID)
+	}
+
+	// Remove the awaiting-approval label and add approved label in one update
+	if err := e.beads.Update(mrID, beads.UpdateOptions{
+		RemoveLabels: []string{"gt:awaiting-approval"},
+		AddLabels:    []string{"gt:approved"},
+	}); err != nil {
+		return fmt.Errorf("failed to update MR labels: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Approved MR %s — will merge on next poll cycle\n", mrID)
+	return nil
+}
+
+// ListAwaitingApproval returns MRs that are waiting for approval.
+func (e *Engineer) ListAwaitingApproval() ([]*MRInfo, error) {
+	issues, err := e.beads.List(beads.ListOptions{
+		Status:   "open",
+		Label:    "gt:awaiting-approval",
+		Priority: -1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing awaiting-approval MRs: %w", err)
+	}
+
+	var result []*MRInfo
+	for _, issue := range issues {
+		fields := beads.ParseMRFields(issue)
+		if fields == nil {
+			continue
+		}
+		mr := &MRInfo{
+			ID:          issue.ID,
+			Branch:      fields.Branch,
+			Target:      fields.Target,
+			Worker:      fields.Worker,
+			SourceIssue: fields.SourceIssue,
+			Title:       issue.Title,
+			Priority:    issue.Priority,
+		}
+		result = append(result, mr)
+	}
+	return result, nil
 }
 
 // createConflictResolutionTaskForMR creates a dispatchable task for resolving merge conflicts.
@@ -1248,6 +1441,15 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		}
 	}
 
+	// Check if this MR has been approved (previously awaiting approval, now cleared)
+	approved := false
+	for _, label := range issue.Labels {
+		if label == "gt:approved" {
+			approved = true
+			break
+		}
+	}
+
 	return &MRInfo{
 		ID:              issue.ID,
 		Branch:          fields.Branch,
@@ -1267,6 +1469,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		Assignee:        issue.Assignee,
+		Approved:        approved,
 	}
 }
 
@@ -1313,6 +1516,12 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 
 		// Skip blocked MRs (replaces bd ready's blocker filtering)
 		if blockedBy := e.firstOpenBlocker(issue); blockedBy != "" {
+			continue
+		}
+
+		// Skip MRs awaiting approval — they need explicit approval before processing.
+		// MRs with gt:approved label are ready to merge and should NOT be skipped.
+		if beads.HasLabel(issue, "gt:awaiting-approval") {
 			continue
 		}
 

@@ -76,6 +76,10 @@ const (
 	// MRPhasePrepared means quality gates completed (may have failed — needs diagnosis).
 	MRPhasePrepared MRPhase = "prepared"
 
+	// MRPhaseAwaitingApproval means quality gates passed and the MR is waiting
+	// for explicit human or mayor approval before the final push.
+	MRPhaseAwaitingApproval MRPhase = "awaiting_approval"
+
 	// MRPhaseMerging means the merge is in progress (ff-merge + push).
 	MRPhaseMerging MRPhase = "merging"
 
@@ -94,9 +98,10 @@ var ValidPhaseTransitions = map[MRPhase][]MRPhase{
 	MRPhaseReady:     {MRPhaseClaimed},
 	MRPhaseClaimed:   {MRPhasePreparing, MRPhaseReady},
 	MRPhasePreparing: {MRPhasePrepared, MRPhaseFailed},
-	MRPhasePrepared:  {MRPhaseMerging, MRPhaseRejected, MRPhaseReady},
-	MRPhaseMerging:   {MRPhaseMerged, MRPhaseFailed},
-	MRPhaseFailed:    {MRPhaseReady},
+	MRPhasePrepared:          {MRPhaseMerging, MRPhaseAwaitingApproval, MRPhaseRejected, MRPhaseReady},
+	MRPhaseAwaitingApproval: {MRPhaseMerging, MRPhaseRejected, MRPhaseReady},
+	MRPhaseMerging:          {MRPhaseMerged, MRPhaseFailed},
+	MRPhaseFailed:           {MRPhaseReady},
 	// Terminal states: MRPhaseMerged, MRPhaseRejected (no transitions out)
 }
 

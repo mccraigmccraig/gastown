@@ -1169,6 +1169,14 @@ type MergeQueueConfig struct {
 	// When empty (default), all MRs are eligible regardless of author.
 	// Example: ["mccraigmccraig"] or ["user@example.com"]
 	AuthorFilter []string `json:"author_filter,omitempty"`
+
+	// ApprovalMode controls whether an approval gate is required before the
+	// final push to the target branch after quality gates pass.
+	// Supported values:
+	//   "none"  — no approval required, push immediately (default)
+	//   "human" — require explicit human approval via `gt refinery approve`
+	//   "mayor" — require mayor approval (mayor is notified automatically)
+	ApprovalMode string `json:"approval_mode,omitempty"`
 }
 
 // OnConflict strategy constants.

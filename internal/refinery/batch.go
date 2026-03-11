@@ -45,6 +45,9 @@ type BatchResult struct {
 	// Conflicts is the set of MRs that had merge conflicts during stack construction.
 	Conflicts []*MRInfo
 
+	// NeedsApproval is the set of MRs that passed gates but need approval before push.
+	NeedsApproval []*MRInfo
+
 	// MergeCommit is the final SHA pushed to the target branch (empty if nothing merged).
 	MergeCommit string
 
@@ -296,6 +299,9 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		result.Conflicts = []*MRInfo{mr}
 	} else if processResult.TestsFailed {
 		result.Culprits = []*MRInfo{mr}
+	} else if processResult.NeedsApproval {
+		// Gates passed but approval is required. Not a failure — route to approval handler.
+		result.NeedsApproval = []*MRInfo{mr}
 	} else if processResult.BranchNotFound {
 		// Branch was cleaned up before we could process it (e.g. cherry-picked to target).
 		// Treat as a skip: log and move on rather than halting the queue.
